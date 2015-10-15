@@ -19,7 +19,8 @@
 
 import notmuch
 import logging
-import os, shutil
+import mailbox
+import os
 from subprocess import check_call, CalledProcessError
 
 from .Database import Database
@@ -64,9 +65,11 @@ class MailMover(Database):
         '''
         # identify and move messages
         logging.info("checking mails in '{}'".format(maildir))
+        source_box = mailbox.Maildir("{}/{}".format(self.db_path, maildir), create=False)
         to_delete_fnames = []
         for query in rules.keys():
             destination = '{}/{}/cur/'.format(self.db_path, rules[query])
+            dest_box = mailbox.Maildir("{}/{}".format(self.db_path, rules[query]), create=False)
             main_query = self.query.format(folder=maildir, subquery=query)
             logging.debug("query: {}".format(main_query))
             messages = notmuch.Query(self.db, main_query).search_messages()
@@ -81,18 +84,22 @@ class MailMover(Database):
                 self.__log_move_action(message, maildir, rules[query],
                                        self.dry_run)
                 for fname in to_move_fnames:
+                    message_key = os.path.basename(fname)
+                    if ':' in message_key:
+                        message_key = message_key[0:message_key.rindex(':')]
+
                     if self.dry_run:
                         continue
-                    try:
-                        shutil.copy2(fname, self.get_new_name(fname, destination))
-                        to_delete_fnames.append(fname)
-                    except shutil.Error as e:
-                        # this is ugly, but shutil does not provide more
-                        # finely individuated errors
-                        if str(e).endswith("already exists"):
-                            continue
-                        else:
-                            raise
+
+                    dest_box.lock()
+                    dest_box.add(source_box[message_key])
+                    dest_box.flush()
+                    dest_box.unlock()
+
+                    source_box.lock()
+                    source_box.discard(message_key)
+                    source_box.flush()
+                    source_box.unlock()
 
         # remove mail from source locations only after all copies are finished
         for fname in set(to_delete_fnames):
